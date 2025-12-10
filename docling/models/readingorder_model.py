@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Dict, List
 
 from docling_core.types.doc import (
     DocItemLabel,
@@ -47,8 +48,8 @@ class ReadingOrderModel:
 
     def _assembled_to_readingorder_elements(
         self, conv_res: ConversionResult
-    ) -> list[ReadingOrderPageElement]:
-        elements: list[ReadingOrderPageElement] = []
+    ) -> List[ReadingOrderPageElement]:
+        elements: List[ReadingOrderPageElement] = []
         page_no_to_pages = {p.page_no: p for p in conv_res.pages}
 
         for element in conv_res.assembled.elements:
@@ -122,10 +123,10 @@ class ReadingOrderModel:
     def _readingorder_elements_to_docling_doc(
         self,
         conv_res: ConversionResult,
-        ro_elements: list[ReadingOrderPageElement],
-        el_to_captions_mapping: dict[int, list[int]],
-        el_to_footnotes_mapping: dict[int, list[int]],
-        el_merges_mapping: dict[int, list[int]],
+        ro_elements: List[ReadingOrderPageElement],
+        el_to_captions_mapping: Dict[int, List[int]],
+        el_to_footnotes_mapping: Dict[int, List[int]],
+        el_merges_mapping: Dict[int, List[int]],
     ) -> DoclingDocument:
         id_to_elem = {
             RefItem(cref=f"#/{elem.page_no}/{elem.cluster.id}").cref: elem

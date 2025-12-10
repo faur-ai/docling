@@ -2,13 +2,13 @@ import base64
 import json
 import logging
 from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import requests
 from PIL import Image
 from pydantic import AnyUrl
 
-from docling.datamodel.base_models import OpenAiApiResponse, VlmStopReason
+from docling.datamodel.base_models import OpenAiApiResponse
 from docling.models.utils.generation_utils import GenerationStopper
 
 _log = logging.getLogger(__name__)
@@ -19,76 +19,48 @@ def api_image_request(
     prompt: str,
     url: AnyUrl,
     timeout: float = 20,
-    headers: Optional[dict[str, str]] = None,
+    headers: Optional[Dict[str, str]] = None,
     **params,
-) -> Tuple[str, Optional[int], VlmStopReason]:
+) -> str:
     img_io = BytesIO()
-    image = (
-        image.copy()
-    )  # Fix for inconsistent PIL image width/height to actual byte data
-    image = image.convert("RGBA")
-    good_image = True
-    try:
-        image.save(img_io, "PNG")
-    except Exception as e:
-        good_image = False
-        _log.error(f"Error, corrupter PNG of size: {image.size}: {e}")
-
-    if good_image:
-        try:
-            image_base64 = base64.b64encode(img_io.getvalue()).decode("utf-8")
-
-            messages = [
+    image.save(img_io, "PNG")
+    image_base64 = base64.b64encode(img_io.getvalue()).decode("utf-8")
+    messages = [
+        {
+            "role": "user",
+            "content": [
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_base64}"
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ]
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                },
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+            ],
+        }
+    ]
 
-            payload = {
-                "messages": messages,
-                **params,
-            }
+    payload = {
+        "messages": messages,
+        **params,
+    }
 
-            headers = headers or {}
+    headers = headers or {}
 
-            r = requests.post(
-                str(url),
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            )
-            if not r.ok:
-                _log.error(f"Error calling the API. Response was {r.text}")
-                # image.show()
-            # r.raise_for_status()
+    r = requests.post(
+        str(url),
+        headers=headers,
+        json=payload,
+        timeout=timeout,
+    )
+    if not r.ok:
+        _log.error(f"Error calling the API. Response was {r.text}")
+    r.raise_for_status()
 
-            api_resp = OpenAiApiResponse.model_validate_json(r.text)
-            generated_text = api_resp.choices[0].message.content.strip()
-            num_tokens = api_resp.usage.total_tokens
-            stop_reason = (
-                VlmStopReason.LENGTH
-                if api_resp.choices[0].finish_reason == "length"
-                else VlmStopReason.END_OF_SEQUENCE
-            )
-
-            return generated_text, num_tokens, stop_reason
-        except Exception as e:
-            _log.error(f"Error, could not process request: {e}")
-            return "", 0, VlmStopReason.UNSPECIFIED
-    else:
-        return "", 0, VlmStopReason.UNSPECIFIED
+    api_resp = OpenAiApiResponse.model_validate_json(r.text)
+    generated_text = api_resp.choices[0].message.content.strip()
+    return generated_text
 
 
 def api_image_request_streaming(
@@ -97,10 +69,10 @@ def api_image_request_streaming(
     url: AnyUrl,
     *,
     timeout: float = 20,
-    headers: Optional[dict[str, str]] = None,
-    generation_stoppers: list[GenerationStopper] = [],
+    headers: Optional[Dict[str, str]] = None,
+    generation_stoppers: List[GenerationStopper] = [],
     **params,
-) -> Tuple[str, Optional[int]]:
+) -> str:
     """
     Stream a chat completion from an OpenAI-compatible server (e.g., vLLM).
     Parses SSE lines: 'data: {json}\\n\\n', terminated by 'data: [DONE]'.
@@ -178,16 +150,6 @@ def api_image_request_streaming(
                 _log.debug("Unexpected SSE chunk shape: %s", e)
                 piece = ""
 
-            # Try to extract token count
-            num_tokens = None
-            try:
-                if "usage" in obj:
-                    usage = obj["usage"]
-                    num_tokens = usage.get("total_tokens")
-            except Exception as e:
-                num_tokens = None
-                _log.debug("Usage key not included in response: %s", e)
-
             if piece:
                 full_text.append(piece)
                 for stopper in generation_stoppers:
@@ -200,6 +162,6 @@ def api_image_request_streaming(
                         # closing the connection when we exit the 'with' block.
                         # vLLM/OpenAI-compatible servers will detect the client disconnect
                         # and abort the request server-side.
-                        return "".join(full_text), num_tokens
+                        return "".join(full_text)
 
-        return "".join(full_text), num_tokens
+        return "".join(full_text)

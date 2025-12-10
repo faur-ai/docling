@@ -59,14 +59,11 @@ class TableFormerMode(str, Enum):
     ACCURATE = "accurate"
 
 
-class BaseTableStructureOptions(BaseOptions):
-    """Base options for table structure models."""
-
-
-class TableStructureOptions(BaseTableStructureOptions):
+class TableStructureOptions(BaseOptions):
     """Options for the table structure."""
 
-    kind: ClassVar[str] = "docling_tableformer"
+    kind: ClassVar[Literal["tableformer"]] = "tableformer"
+
     do_cell_matching: bool = (
         True
         # True:  Matches predictions back to PDF cells. Can break table output if PDF cells
@@ -84,13 +81,6 @@ class OcrOptions(BaseOptions):
     bitmap_area_threshold: float = (
         0.05  # percentage of the area for a bitmap to processed with OCR
     )
-
-
-class OcrAutoOptions(OcrOptions):
-    """Options for pick OCR engine automatically."""
-
-    kind: ClassVar[Literal["auto"]] = "auto"
-    lang: List[str] = []
 
 
 class RapidOcrOptions(OcrOptions):
@@ -166,9 +156,6 @@ class TesseractCliOcrOptions(OcrOptions):
     lang: List[str] = ["fra", "deu", "spa", "eng"]
     tesseract_cmd: str = "tesseract"
     path: Optional[str] = None
-    psm: Optional[int] = (
-        None  # Page Segmentation Mode (0-13), defaults to tesseract's default
-    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -181,9 +168,6 @@ class TesseractOcrOptions(OcrOptions):
     kind: ClassVar[Literal["tesserocr"]] = "tesserocr"
     lang: List[str] = ["fra", "deu", "spa", "eng"]
     path: Optional[str] = None
-    psm: Optional[int] = (
-        None  # Page Segmentation Mode (0-13), defaults to tesseract's default
-    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -267,7 +251,6 @@ class PdfBackend(str, Enum):
 class OcrEngine(str, Enum):
     """Enum of valid OCR engines."""
 
-    AUTO = "auto"
     EASYOCR = "easyocr"
     TESSERACT_CLI = "tesseract_cli"
     TESSERACT = "tesseract"
@@ -313,23 +296,17 @@ class VlmPipelineOptions(PaginatedPipelineOptions):
     )
 
 
-class BaseLayoutOptions(BaseOptions):
-    """Base options for layout models."""
+class LayoutOptions(BaseModel):
+    """Options for layout processing."""
 
+    create_orphan_clusters: bool = True  # Whether to create clusters for orphaned cells
     keep_empty_clusters: bool = (
         False  # Whether to keep clusters that contain no text cells
     )
+    model_spec: LayoutModelConfig = DOCLING_LAYOUT_HERON
     skip_cell_assignment: bool = (
         False  # Skip cell-to-cluster assignment for VLM-only processing
     )
-
-
-class LayoutOptions(BaseLayoutOptions):
-    """Options for layout processing."""
-
-    kind: ClassVar[str] = "docling_layout_default"
-    create_orphan_clusters: bool = True  # Whether to create clusters for orphaned cells
-    model_spec: LayoutModelConfig = DOCLING_LAYOUT_HERON
 
 
 class AsrPipelineOptions(PipelineOptions):
@@ -354,9 +331,9 @@ class PdfPipelineOptions(PaginatedPipelineOptions):
     )
     # If True, text from backend will be used instead of generated text
 
-    table_structure_options: BaseTableStructureOptions = TableStructureOptions()
-    ocr_options: OcrOptions = OcrAutoOptions()
-    layout_options: BaseLayoutOptions = LayoutOptions()
+    table_structure_options: TableStructureOptions = TableStructureOptions()
+    ocr_options: OcrOptions = EasyOcrOptions()
+    layout_options: LayoutOptions = LayoutOptions()
 
     images_scale: float = 1.0
     generate_page_images: bool = False
@@ -372,22 +349,8 @@ class PdfPipelineOptions(PaginatedPipelineOptions):
 
     generate_parsed_pages: bool = False
 
-    ### Arguments for threaded PDF pipeline with batching and backpressure control
-
-    # Batch sizes for different stages
-    ocr_batch_size: int = 4
-    layout_batch_size: int = 4
-    table_batch_size: int = 4
-
-    # Timing control
-    batch_polling_interval_seconds: float = 0.5
-
-    # Backpressure and queue control
-    queue_max_size: int = 100
-
 
 class ProcessingPipeline(str, Enum):
-    LEGACY = "legacy"
     STANDARD = "standard"
     VLM = "vlm"
     ASR = "asr"
@@ -395,3 +358,14 @@ class ProcessingPipeline(str, Enum):
 
 class ThreadedPdfPipelineOptions(PdfPipelineOptions):
     """Pipeline options for the threaded PDF pipeline with batching and backpressure control"""
+
+    # Batch sizes for different stages
+    ocr_batch_size: int = 4
+    layout_batch_size: int = 4
+    table_batch_size: int = 4
+
+    # Timing control
+    batch_timeout_seconds: float = 2.0
+
+    # Backpressure and queue control
+    queue_max_size: int = 100

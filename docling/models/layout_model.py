@@ -1,7 +1,7 @@
 import copy
 import logging
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterable
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -15,7 +15,7 @@ from docling.datamodel.document import ConversionResult
 from docling.datamodel.layout_model_specs import DOCLING_LAYOUT_V2, LayoutModelConfig
 from docling.datamodel.pipeline_options import LayoutOptions
 from docling.datamodel.settings import settings
-from docling.models.base_layout_model import BaseLayoutModel
+from docling.models.base_model import BasePageModel
 from docling.models.utils.hf_model_download import download_hf_model
 from docling.utils.accelerator_utils import decide_device
 from docling.utils.layout_postprocessor import LayoutPostprocessor
@@ -25,7 +25,7 @@ from docling.utils.visualization import draw_clusters
 _log = logging.getLogger(__name__)
 
 
-class LayoutModel(BaseLayoutModel):
+class LayoutModel(BasePageModel):
     TEXT_ELEM_LABELS = [
         DocItemLabel.TEXT,
         DocItemLabel.FOOTNOTE,
@@ -86,10 +86,6 @@ class LayoutModel(BaseLayoutModel):
             num_threads=accelerator_options.num_threads,
         )
 
-    @classmethod
-    def get_options_type(cls) -> type[LayoutOptions]:
-        return LayoutOptions
-
     @staticmethod
     def download_models(
         local_dir: Optional[Path] = None,
@@ -149,13 +145,11 @@ class LayoutModel(BaseLayoutModel):
             out_file = out_path / f"{mode_prefix}_layout_page_{page.page_no:05}.png"
             combined_image.save(str(out_file), format="png")
 
-    def predict_layout(
-        self,
-        conv_res: ConversionResult,
-        pages: Sequence[Page],
-    ) -> Sequence[LayoutPrediction]:
-        # Convert to list to ensure predictable iteration
-        pages = list(pages)
+    def __call__(
+        self, conv_res: ConversionResult, page_batch: Iterable[Page]
+    ) -> Iterable[Page]:
+        # Convert to list to allow multiple iterations
+        pages = list(page_batch)
 
         # Separate valid and invalid pages
         valid_pages = []
@@ -182,14 +176,11 @@ class LayoutModel(BaseLayoutModel):
                 )
 
         # Process each page with its predictions
-        layout_predictions: list[LayoutPrediction] = []
         valid_page_idx = 0
         for page in pages:
             assert page._backend is not None
             if not page._backend.is_valid():
-                existing_prediction = page.predictions.layout or LayoutPrediction()
-                page.predictions.layout = existing_prediction
-                layout_predictions.append(existing_prediction)
+                yield page
                 continue
 
             page_predictions = batch_predictions[valid_page_idx]
@@ -236,14 +227,11 @@ class LayoutModel(BaseLayoutModel):
                     np.mean([c.confidence for c in processed_cells if c.from_ocr])
                 )
 
-            prediction = LayoutPrediction(clusters=processed_clusters)
-            page.predictions.layout = prediction
+            page.predictions.layout = LayoutPrediction(clusters=processed_clusters)
 
             if settings.debug.visualize_layout:
                 self.draw_clusters_and_cells_side_by_side(
                     conv_res, page, processed_clusters, mode_prefix="postprocessed"
                 )
 
-            layout_predictions.append(prediction)
-
-        return layout_predictions
+            yield page

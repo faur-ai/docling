@@ -1,25 +1,21 @@
 import csv
-import importlib
-import json
 import logging
-import platform
 import re
-import sys
 import tarfile
-import zipfile
 from collections.abc import Iterable, Mapping
-from datetime import datetime
 from enum import Enum
 from io import BytesIO
 from pathlib import Path, PurePath
 from typing import (
     TYPE_CHECKING,
-    Annotated,
+    Any,
+    Dict,
+    List,
     Literal,
     Optional,
+    Set,
     Type,
     Union,
-    cast,
 )
 
 import filetype
@@ -58,10 +54,8 @@ from typing_extensions import deprecated
 
 from docling.backend.abstract_backend import (
     AbstractDocumentBackend,
-    DeclarativeDocumentBackend,
     PaginatedDocumentBackend,
 )
-from docling.datamodel.backend_options import BackendOptions
 from docling.datamodel.base_models import (
     AssembledUnit,
     ConfidenceReport,
@@ -80,7 +74,6 @@ from docling.utils.utils import create_file_hash
 
 if TYPE_CHECKING:
     from docling.datamodel.base_models import BaseFormatOption
-    from docling.document_converter import FormatOption
 
 _log = logging.getLogger(__name__)
 
@@ -109,46 +102,29 @@ _EMPTY_DOCLING_DOC = DoclingDocument(name="dummy")
 
 
 class InputDocument(BaseModel):
-    """A document as an input of a Docling conversion."""
+    file: PurePath
+    document_hash: str  # = None
+    valid: bool = True
+    limits: DocumentLimits = DocumentLimits()
+    format: InputFormat  # = None
 
-    file: Annotated[
-        PurePath, Field(description="A path representation the input document.")
-    ]
-    document_hash: Annotated[
-        str,
-        Field(description="A stable hash of the path or stream of the input document."),
-    ]
-    valid: bool = Field(True, description="Whether this is is a valid input document.")
-    backend_options: Optional[BackendOptions] = Field(
-        None, description="Custom options for backends."
-    )
-    limits: DocumentLimits = Field(
-        DocumentLimits(), description="Limits in the input document for the conversion."
-    )
-    format: Annotated[InputFormat, Field(description="The document format.")]
+    filesize: Optional[int] = None
+    page_count: int = 0
 
-    filesize: Optional[int] = Field(
-        None, description="Size of the input file, in bytes."
-    )
-    page_count: int = Field(0, description="Number of pages in the input document.")
-
-    _backend: AbstractDocumentBackend
+    _backend: AbstractDocumentBackend  # Internal PDF backend used
 
     def __init__(
         self,
         path_or_stream: Union[BytesIO, Path],
         format: InputFormat,
         backend: Type[AbstractDocumentBackend],
-        backend_options: Optional[BackendOptions] = None,
         filename: Optional[str] = None,
         limits: Optional[DocumentLimits] = None,
-    ) -> None:
+    ):
         super().__init__(
-            file="",
-            document_hash="",
-            format=InputFormat.PDF,
-            backend_options=backend_options,
+            file="", document_hash="", format=InputFormat.PDF
         )  # initialize with dummy values
+
         self.limits = limits or DocumentLimits()
         self.format = format
 
@@ -164,8 +140,7 @@ class InputDocument(BaseModel):
 
             elif isinstance(path_or_stream, BytesIO):
                 assert filename is not None, (
-                    "Can't construct InputDocument from stream without providing "
-                    "filename arg."
+                    "Can't construct InputDocument from stream without providing filename arg."
                 )
                 self.file = PurePath(filename)
                 self.filesize = path_or_stream.getbuffer().nbytes
@@ -200,8 +175,7 @@ class InputDocument(BaseModel):
         except RuntimeError as e:
             self.valid = False
             _log.exception(
-                "An unexpected error occurred while opening the document "
-                f"{self.file.name}",
+                f"An unexpected error occurred while opening the document {self.file.name}",
                 exc_info=e,
             )
             # raise
@@ -211,15 +185,7 @@ class InputDocument(BaseModel):
         backend: Type[AbstractDocumentBackend],
         path_or_stream: Union[BytesIO, Path],
     ) -> None:
-        if self.backend_options:
-            self._backend = backend(
-                self,
-                path_or_stream=path_or_stream,
-                options=self.backend_options,
-            )
-        else:
-            self._backend = backend(self, path_or_stream=path_or_stream)
-
+        self._backend = backend(self, path_or_stream=path_or_stream)
         if not self._backend.is_valid():
             self.valid = False
 
@@ -229,26 +195,15 @@ class DocumentFormat(str, Enum):
     V1 = "v1"
 
 
-class DoclingVersion(BaseModel):
-    docling_version: str = importlib.metadata.version("docling")
-    docling_core_version: str = importlib.metadata.version("docling-core")
-    docling_ibm_models_version: str = importlib.metadata.version("docling-ibm-models")
-    docling_parse_version: str = importlib.metadata.version("docling-parse")
-    platform_str: str = platform.platform()
-    py_impl_version: str = sys.implementation.cache_tag
-    py_lang_version: str = platform.python_version()
-
-
-class ConversionAssets(BaseModel):
-    version: DoclingVersion = DoclingVersion()
-    # When the assets were saved (ISO string from datetime.now())
-    timestamp: Optional[str] = None
+class ConversionResult(BaseModel):
+    input: InputDocument
 
     status: ConversionStatus = ConversionStatus.PENDING  # failure, success
-    errors: list[ErrorItem] = []  # structure to keep errors
+    errors: List[ErrorItem] = []  # structure to keep errors
 
-    pages: list[Page] = []
-    timings: dict[str, ProfilingItem] = {}
+    pages: List[Page] = []
+    assembled: AssembledUnit = AssembledUnit()
+    timings: Dict[str, ProfilingItem] = {}
     confidence: ConfidenceReport = Field(default_factory=ConfidenceReport)
 
     document: DoclingDocument = _EMPTY_DOCLING_DOC
@@ -257,166 +212,6 @@ class ConversionAssets(BaseModel):
     @deprecated("Use document instead.")
     def legacy_document(self):
         return docling_document_to_legacy(self.document)
-
-    def save(
-        self,
-        *,
-        filename: Union[str, Path],
-        indent: Optional[int] = 2,
-    ):
-        """Serialize the full ConversionAssets to JSON."""
-        if isinstance(filename, str):
-            filename = Path(filename)
-        # Build an in-memory ZIP archive containing JSON for each asset
-        buf = BytesIO()
-
-        def to_jsonable(obj):
-            try:
-                # pydantic v2 models
-                if hasattr(obj, "model_dump"):
-                    return obj.model_dump(mode="json")  # type: ignore[attr-defined]
-            except TypeError:
-                # some models may not accept mode argument
-                return obj.model_dump()  # type: ignore[attr-defined]
-
-            # enums
-            try:
-                from enum import Enum
-
-                if isinstance(obj, Enum):
-                    return obj.value
-            except Exception:
-                pass
-
-            # containers
-            if isinstance(obj, list):
-                return [to_jsonable(x) for x in obj]
-            if isinstance(obj, dict):
-                return {k: to_jsonable(v) for k, v in obj.items()}
-
-            # passthrough primitives
-            return obj
-
-        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-
-            def write_json(name: str, payload) -> None:
-                data = json.dumps(
-                    to_jsonable(payload), ensure_ascii=False, indent=indent
-                )
-                zf.writestr(name, data.encode("utf-8"))
-
-            # Update and persist a save timestamp
-            self.timestamp = datetime.now().isoformat()
-            write_json("timestamp.json", self.timestamp)
-
-            # Store each component in its own JSON file
-            write_json("version.json", self.version)
-            write_json("status.json", self.status)
-            write_json("errors.json", self.errors)
-            write_json("pages.json", self.pages)
-            write_json("timings.json", self.timings)
-            write_json("confidence.json", self.confidence)
-            # For the document, ensure stable schema via export_to_dict
-            doc_dict = self.document.export_to_dict()
-            zf.writestr(
-                "document.json",
-                json.dumps(doc_dict, ensure_ascii=False, indent=indent).encode("utf-8"),
-            )
-
-        # Persist the ZIP to disk
-        buf.seek(0)
-        if filename.parent and not filename.parent.exists():
-            filename.parent.mkdir(parents=True, exist_ok=True)
-        with filename.open("wb") as f:
-            f.write(buf.getvalue())
-
-    @classmethod
-    def load(cls, filename: Union[str, Path]) -> "ConversionAssets":
-        """Load a ConversionAssets."""
-        if isinstance(filename, str):
-            filename = Path(filename)
-
-        # Read the ZIP and deserialize all items
-        version_info: DoclingVersion = DoclingVersion()
-        timestamp: Optional[str] = None
-        status = ConversionStatus.PENDING
-        errors: list[ErrorItem] = []
-        pages: list[Page] = []
-        timings: dict[str, ProfilingItem] = {}
-        confidence = ConfidenceReport()
-        document: DoclingDocument = _EMPTY_DOCLING_DOC
-
-        with zipfile.ZipFile(filename, mode="r") as zf:
-
-            def read_json(name: str):
-                try:
-                    with zf.open(name, "r") as fp:
-                        return json.loads(fp.read().decode("utf-8"))
-                except KeyError:
-                    return None
-
-            # version
-            if (data := read_json("version.json")) is not None:
-                try:
-                    version_info = DoclingVersion.model_validate(data)
-                except Exception as exc:
-                    _log.error(f"Could not read version: {exc}")
-
-            # timestamp
-            if (data := read_json("timestamp.json")) is not None:
-                if isinstance(data, str):
-                    timestamp = data
-
-            # status
-            if (data := read_json("status.json")) is not None:
-                try:
-                    status = ConversionStatus(data)
-                except Exception:
-                    status = ConversionStatus.PENDING
-
-            # errors
-            if (data := read_json("errors.json")) is not None and isinstance(
-                data, list
-            ):
-                errors = [ErrorItem.model_validate(item) for item in data]
-
-            # pages
-            if (data := read_json("pages.json")) is not None and isinstance(data, list):
-                pages = [Page.model_validate(item) for item in data]
-
-            # timings
-            if (data := read_json("timings.json")) is not None and isinstance(
-                data, dict
-            ):
-                timings = {k: ProfilingItem.model_validate(v) for k, v in data.items()}
-
-            # confidence
-            if (data := read_json("confidence.json")) is not None and isinstance(
-                data, dict
-            ):
-                confidence = ConfidenceReport.model_validate(data)
-
-            # document
-            if (data := read_json("document.json")) is not None and isinstance(
-                data, dict
-            ):
-                document = DoclingDocument.model_validate(data)
-
-        return cls(
-            version=version_info,
-            timestamp=timestamp,
-            status=status,
-            errors=errors,
-            pages=pages,
-            timings=timings,
-            confidence=confidence,
-            document=document,
-        )
-
-
-class ConversionResult(ConversionAssets):
-    input: InputDocument
-    assembled: AssembledUnit = AssembledUnit()
 
 
 class _DummyBackend(AbstractDocumentBackend):
@@ -427,7 +222,7 @@ class _DummyBackend(AbstractDocumentBackend):
         return False
 
     @classmethod
-    def supported_formats(cls) -> set[InputFormat]:
+    def supported_formats(cls) -> Set[InputFormat]:
         return set()
 
     @classmethod
@@ -440,7 +235,7 @@ class _DummyBackend(AbstractDocumentBackend):
 
 class _DocumentConversionInput(BaseModel):
     path_or_stream_iterator: Iterable[Union[Path, str, DocumentStream]]
-    headers: Optional[dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
     limits: Optional[DocumentLimits] = DocumentLimits()
 
     def docs(
@@ -455,35 +250,32 @@ class _DocumentConversionInput(BaseModel):
             )
             format = self._guess_format(obj)
             backend: Type[AbstractDocumentBackend]
-            backend_options: Optional[BackendOptions] = None
-            if not format or format not in format_options:
+            if format not in format_options.keys():
                 _log.error(
-                    f"Input document {obj.name} with format {format} does not match "
-                    f"any allowed format: ({format_options.keys()})"
+                    f"Input document {obj.name} with format {format} does not match any allowed format: ({format_options.keys()})"
                 )
                 backend = _DummyBackend
             else:
-                options = format_options[format]
-                backend = options.backend
-                if "backend_options" in options.model_fields_set:
-                    backend_options = cast("FormatOption", options).backend_options
+                backend = format_options[format].backend
 
-            path_or_stream: Union[BytesIO, Path]
             if isinstance(obj, Path):
-                path_or_stream = obj
+                yield InputDocument(
+                    path_or_stream=obj,
+                    format=format,  # type: ignore[arg-type]
+                    filename=obj.name,
+                    limits=self.limits,
+                    backend=backend,
+                )
             elif isinstance(obj, DocumentStream):
-                path_or_stream = obj.stream
+                yield InputDocument(
+                    path_or_stream=obj.stream,
+                    format=format,  # type: ignore[arg-type]
+                    filename=obj.name,
+                    limits=self.limits,
+                    backend=backend,
+                )
             else:
                 raise RuntimeError(f"Unexpected obj type in iterator: {type(obj)}")
-
-            yield InputDocument(
-                path_or_stream=path_or_stream,
-                format=format,  # type: ignore[arg-type]
-                filename=obj.name,
-                limits=self.limits,
-                backend=backend,
-                backend_options=backend_options,
-            )
 
     def _guess_format(self, obj: Union[Path, DocumentStream]) -> Optional[InputFormat]:
         content = b""  # empty binary blob
@@ -498,13 +290,12 @@ class _DocumentConversionInput(BaseModel):
                 with obj.open("rb") as f:
                     content = f.read(1024)  # Read first 1KB
             if mime is not None and mime.lower() == "application/zip":
-                mime_root = "application/vnd.openxmlformats-officedocument"
                 if obj.suffixes[-1].lower() == ".xlsx":
-                    mime = mime_root + ".spreadsheetml.sheet"
+                    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 elif obj.suffixes[-1].lower() == ".docx":
-                    mime = mime_root + ".wordprocessingml.document"
+                    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 elif obj.suffixes[-1].lower() == ".pptx":
-                    mime = mime_root + ".presentationml.presentation"
+                    mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
         elif isinstance(obj, DocumentStream):
             content = obj.stream.read(8192)
@@ -519,13 +310,12 @@ class _DocumentConversionInput(BaseModel):
                 mime = _DocumentConversionInput._mime_from_extension(ext.lower())
             if mime is not None and mime.lower() == "application/zip":
                 objname = obj.name.lower()
-                mime_root = "application/vnd.openxmlformats-officedocument"
                 if objname.endswith(".xlsx"):
-                    mime = mime_root + ".spreadsheetml.sheet"
+                    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 elif objname.endswith(".docx"):
-                    mime = mime_root + ".wordprocessingml.document"
+                    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 elif objname.endswith(".pptx"):
-                    mime = mime_root + ".presentationml.presentation"
+                    mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
         if mime is not None and mime.lower() == "application/gzip":
             if detected_mime := _DocumentConversionInput._detect_mets_gbs(obj):

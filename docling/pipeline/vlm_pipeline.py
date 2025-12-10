@@ -6,7 +6,6 @@ from typing import List, Optional, Union, cast
 
 from docling_core.types.doc import (
     BoundingBox,
-    ContentLayer,
     DocItem,
     DoclingDocument,
     ImageRef,
@@ -114,9 +113,6 @@ class VlmPipeline(PaginatedPipeline):
 
     def initialize_page(self, conv_res: ConversionResult, page: Page) -> Page:
         with TimeRecorder(conv_res, "page_init"):
-            images_scale = self.pipeline_options.images_scale
-            if images_scale is not None:
-                page._default_image_scale = images_scale
             page._backend = conv_res.input._backend.load_page(page.page_no)  # type: ignore
             if page._backend is not None and page._backend.is_valid():
                 page.size = page._backend.get_size()
@@ -255,9 +251,9 @@ class VlmPipeline(PaginatedPipeline):
                 # No code blocks found, return original text
                 return text
 
-        page_docs = []
-
         for pg_idx, page in enumerate(conv_res.pages):
+            page_no = pg_idx + 1  # FIXME: might be incorrect
+
             predicted_text = ""
             if page.predictions.vlm_response:
                 predicted_text = page.predictions.vlm_response.text + "\n\n"
@@ -277,24 +273,6 @@ class VlmPipeline(PaginatedPipeline):
             )
             page_doc = backend.convert()
 
-            # Modify provenance in place for all items in the page document
-            for item, level in page_doc.iterate_items(
-                with_groups=True,
-                traverse_pictures=True,
-                included_content_layers=set(ContentLayer),
-            ):
-                if isinstance(item, DocItem):
-                    item.prov = [
-                        ProvenanceItem(
-                            page_no=pg_idx + 1,
-                            bbox=BoundingBox(
-                                t=0.0, b=0.0, l=0.0, r=0.0
-                            ),  # FIXME: would be nice not to have to "fake" it
-                            charspan=[0, 0],
-                        )
-                    ]
-
-            # Add page metadata to the page document before concatenation
             if page.image is not None:
                 pg_width = page.image.width
                 pg_height = page.image.height
@@ -302,18 +280,27 @@ class VlmPipeline(PaginatedPipeline):
                 pg_width = 1
                 pg_height = 1
 
-            page_doc.add_page(
-                page_no=pg_idx + 1,
+            conv_res.document.add_page(
+                page_no=page_no,
                 size=Size(width=pg_width, height=pg_height),
                 image=ImageRef.from_pil(image=page.image, dpi=72)
                 if page.image
                 else None,
             )
 
-            page_docs.append(page_doc)
+            for item, level in page_doc.iterate_items():
+                item.prov = [
+                    ProvenanceItem(
+                        page_no=pg_idx + 1,
+                        bbox=BoundingBox(
+                            t=0.0, b=0.0, l=0.0, r=0.0
+                        ),  # FIXME: would be nice not to have to "fake" it
+                        charspan=[0, 0],
+                    )
+                ]
+                conv_res.document.append_child_item(child=item)
 
-        final_doc = DoclingDocument.concatenate(docs=page_docs)
-        return final_doc
+        return conv_res.document
 
     def _turn_html_into_doc(self, conv_res):
         def _extract_html_code(text):
@@ -341,9 +328,9 @@ class VlmPipeline(PaginatedPipeline):
                 # No code blocks found, return original text
                 return text
 
-        page_docs = []
-
         for pg_idx, page in enumerate(conv_res.pages):
+            page_no = pg_idx + 1  # FIXME: might be incorrect
+
             predicted_text = ""
             if page.predictions.vlm_response:
                 predicted_text = page.predictions.vlm_response.text + "\n\n"
@@ -354,7 +341,7 @@ class VlmPipeline(PaginatedPipeline):
             out_doc = InputDocument(
                 path_or_stream=response_bytes,
                 filename=conv_res.input.file.name,
-                format=InputFormat.HTML,
+                format=InputFormat.MD,
                 backend=HTMLDocumentBackend,
             )
             backend = HTMLDocumentBackend(
@@ -363,24 +350,6 @@ class VlmPipeline(PaginatedPipeline):
             )
             page_doc = backend.convert()
 
-            # Modify provenance in place for all items in the page document
-            for item, level in page_doc.iterate_items(
-                with_groups=True,
-                traverse_pictures=True,
-                included_content_layers=set(ContentLayer),
-            ):
-                if isinstance(item, DocItem):
-                    item.prov = [
-                        ProvenanceItem(
-                            page_no=pg_idx + 1,
-                            bbox=BoundingBox(
-                                t=0.0, b=0.0, l=0.0, r=0.0
-                            ),  # FIXME: would be nice not to have to "fake" it
-                            charspan=[0, 0],
-                        )
-                    ]
-
-            # Add page metadata to the page document before concatenation
             if page.image is not None:
                 pg_width = page.image.width
                 pg_height = page.image.height
@@ -388,19 +357,27 @@ class VlmPipeline(PaginatedPipeline):
                 pg_width = 1
                 pg_height = 1
 
-            page_doc.add_page(
-                page_no=pg_idx + 1,
+            conv_res.document.add_page(
+                page_no=page_no,
                 size=Size(width=pg_width, height=pg_height),
                 image=ImageRef.from_pil(image=page.image, dpi=72)
                 if page.image
                 else None,
             )
 
-            page_docs.append(page_doc)
+            for item, level in page_doc.iterate_items():
+                item.prov = [
+                    ProvenanceItem(
+                        page_no=pg_idx + 1,
+                        bbox=BoundingBox(
+                            t=0.0, b=0.0, l=0.0, r=0.0
+                        ),  # FIXME: would be nice not to have to "fake" it
+                        charspan=[0, 0],
+                    )
+                ]
+                conv_res.document.append_child_item(child=item)
 
-        # Concatenate all page documents to preserve hierarchy
-        final_doc = DoclingDocument.concatenate(docs=page_docs)
-        return final_doc
+        return conv_res.document
 
     @classmethod
     def get_default_options(cls) -> VlmPipelineOptions:

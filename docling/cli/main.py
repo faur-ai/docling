@@ -26,44 +26,30 @@ from rich.console import Console
 from docling.backend.docling_parse_backend import DoclingParseDocumentBackend
 from docling.backend.docling_parse_v2_backend import DoclingParseV2DocumentBackend
 from docling.backend.docling_parse_v4_backend import DoclingParseV4DocumentBackend
-from docling.backend.image_backend import ImageDocumentBackend
 from docling.backend.mets_gbs_backend import MetsGbsDocumentBackend
 from docling.backend.pdf_backend import PdfDocumentBackend
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
 from docling.datamodel.asr_model_specs import (
     WHISPER_BASE,
-    WHISPER_BASE_MLX,
-    WHISPER_BASE_NATIVE,
     WHISPER_LARGE,
-    WHISPER_LARGE_MLX,
-    WHISPER_LARGE_NATIVE,
     WHISPER_MEDIUM,
-    WHISPER_MEDIUM_MLX,
-    WHISPER_MEDIUM_NATIVE,
     WHISPER_SMALL,
-    WHISPER_SMALL_MLX,
-    WHISPER_SMALL_NATIVE,
     WHISPER_TINY,
-    WHISPER_TINY_MLX,
-    WHISPER_TINY_NATIVE,
     WHISPER_TURBO,
-    WHISPER_TURBO_MLX,
-    WHISPER_TURBO_NATIVE,
     AsrModelType,
 )
-from docling.datamodel.backend_options import PdfBackendOptions
 from docling.datamodel.base_models import (
     ConversionStatus,
     FormatToExtensions,
     InputFormat,
     OutputFormat,
 )
-from docling.datamodel.document import ConversionResult, DoclingVersion
+from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import (
     AsrPipelineOptions,
     ConvertPipelineOptions,
-    OcrAutoOptions,
+    EasyOcrOptions,
     OcrOptions,
     PaginatedPipelineOptions,
     PdfBackend,
@@ -71,9 +57,6 @@ from docling.datamodel.pipeline_options import (
     PipelineOptions,
     ProcessingPipeline,
     TableFormerMode,
-    TableStructureOptions,
-    TesseractCliOcrOptions,
-    TesseractOcrOptions,
     VlmPipelineOptions,
 )
 from docling.datamodel.settings import settings
@@ -169,13 +152,19 @@ def logo_callback(value: bool):
 
 def version_callback(value: bool):
     if value:
-        v = DoclingVersion()
-        print(f"Docling version: {v.docling_version}")
-        print(f"Docling Core version: {v.docling_core_version}")
-        print(f"Docling IBM Models version: {v.docling_ibm_models_version}")
-        print(f"Docling Parse version: {v.docling_parse_version}")
-        print(f"Python: {v.py_impl_version} ({v.py_lang_version})")
-        print(f"Platform: {v.platform_str}")
+        docling_version = importlib.metadata.version("docling")
+        docling_core_version = importlib.metadata.version("docling-core")
+        docling_ibm_models_version = importlib.metadata.version("docling-ibm-models")
+        docling_parse_version = importlib.metadata.version("docling-parse")
+        platform_str = platform.platform()
+        py_impl_version = sys.implementation.cache_tag
+        py_lang_version = platform.python_version()
+        print(f"Docling version: {docling_version}")
+        print(f"Docling Core version: {docling_core_version}")
+        print(f"Docling IBM Models version: {docling_ibm_models_version}")
+        print(f"Docling Parse version: {docling_parse_version}")
+        print(f"Python: {py_impl_version} ({py_lang_version})")
+        print(f"Platform: {platform_str}")
         raise typer.Exit()
 
 
@@ -281,7 +270,7 @@ def export_documents(
             if export_doctags:
                 fname = output_dir / f"{doc_filename}.doctags"
                 _log.info(f"writing Doc Tags output to {fname}")
-                conv_res.document.save_as_doctags(filename=fname)
+                conv_res.document.save_as_document_tokens(filename=fname)
 
         else:
             _log.warning(f"Document {conv_res.input.file} failed to convert.")
@@ -383,7 +372,7 @@ def convert(  # noqa: C901
                 f"Use the option --show-external-plugins to see the options allowed with external plugins."
             ),
         ),
-    ] = OcrAutoOptions.kind,
+    ] = EasyOcrOptions.kind,
     ocr_lang: Annotated[
         Optional[str],
         typer.Option(
@@ -391,19 +380,9 @@ def convert(  # noqa: C901
             help="Provide a comma-separated list of languages used by the OCR engine. Note that each OCR engine has different values for the language names.",
         ),
     ] = None,
-    psm: Annotated[
-        Optional[int],
-        typer.Option(
-            ...,
-            help="Page Segmentation Mode for the OCR engine (0-13).",
-        ),
-    ] = None,
     pdf_backend: Annotated[
         PdfBackend, typer.Option(..., help="The PDF backend to use.")
-    ] = PdfBackend.DLPARSE_V4,
-    pdf_password: Annotated[
-        Optional[str], typer.Option(..., help="Password for protected PDF documents")
-    ] = None,
+    ] = PdfBackend.DLPARSE_V2,
     table_mode: Annotated[
         TableFormerMode,
         typer.Option(..., help="The mode to use in the table structure model."),
@@ -568,25 +547,13 @@ def convert(  # noqa: C901
                     if local_path.exists() and local_path.is_dir():
                         for fmt in from_formats:
                             for ext in FormatToExtensions[fmt]:
-                                for path in local_path.glob(f"**/*.{ext}"):
-                                    if path.name.startswith("~$") and ext == "docx":
-                                        _log.info(
-                                            f"Ignoring temporary Word file: {path}"
-                                        )
-                                        continue
-                                    input_doc_paths.append(path)
-
-                                for path in local_path.glob(f"**/*.{ext.upper()}"):
-                                    if path.name.startswith("~$") and ext == "docx":
-                                        _log.info(
-                                            f"Ignoring temporary Word file: {path}"
-                                        )
-                                        continue
-                                    input_doc_paths.append(path)
+                                input_doc_paths.extend(
+                                    list(local_path.glob(f"**/*.{ext}"))
+                                )
+                                input_doc_paths.extend(
+                                    list(local_path.glob(f"**/*.{ext.upper()}"))
+                                )
                     elif local_path.exists():
-                        if not local_path.name.startswith("~$") and ext == "docx":
-                            _log.info(f"Ignoring temporary Word file: {path}")
-                            continue
                         input_doc_paths.append(local_path)
                     else:
                         err_console.print(
@@ -617,20 +584,12 @@ def convert(  # noqa: C901
         ocr_lang_list = _split_list(ocr_lang)
         if ocr_lang_list is not None:
             ocr_options.lang = ocr_lang_list
-        if psm is not None and isinstance(
-            ocr_options, (TesseractOcrOptions, TesseractCliOcrOptions)
-        ):
-            ocr_options.psm = psm
 
         accelerator_options = AcceleratorOptions(num_threads=num_threads, device=device)
-
         # pipeline_options: PaginatedPipelineOptions
         pipeline_options: PipelineOptions
 
         format_options: Dict[InputFormat, FormatOption] = {}
-        pdf_backend_options: Optional[PdfBackendOptions] = PdfBackendOptions(
-            password=pdf_password
-        )
 
         if pipeline == ProcessingPipeline.STANDARD:
             pipeline_options = PdfPipelineOptions(
@@ -646,13 +605,10 @@ def convert(  # noqa: C901
                 do_picture_classification=enrich_picture_classes,
                 document_timeout=document_timeout,
             )
-            if isinstance(
-                pipeline_options.table_structure_options, TableStructureOptions
-            ):
-                pipeline_options.table_structure_options.do_cell_matching = (
-                    True  # do_cell_matching
-                )
-                pipeline_options.table_structure_options.mode = table_mode
+            pipeline_options.table_structure_options.do_cell_matching = (
+                True  # do_cell_matching
+            )
+            pipeline_options.table_structure_options.mode = table_mode
 
             if image_export_mode != ImageRefMode.PLACEHOLDER:
                 pipeline_options.generate_page_images = True
@@ -664,10 +620,8 @@ def convert(  # noqa: C901
             backend: Type[PdfDocumentBackend]
             if pdf_backend == PdfBackend.DLPARSE_V1:
                 backend = DoclingParseDocumentBackend
-                pdf_backend_options = None
             elif pdf_backend == PdfBackend.DLPARSE_V2:
                 backend = DoclingParseV2DocumentBackend
-                pdf_backend_options = None
             elif pdf_backend == PdfBackend.DLPARSE_V4:
                 backend = DoclingParseV4DocumentBackend  # type: ignore
             elif pdf_backend == PdfBackend.PYPDFIUM2:
@@ -678,7 +632,6 @@ def convert(  # noqa: C901
             pdf_format_option = PdfFormatOption(
                 pipeline_options=pipeline_options,
                 backend=backend,  # pdf_backend
-                backend_options=pdf_backend_options,
             )
 
             # METS GBS options
@@ -697,16 +650,9 @@ def convert(  # noqa: C901
             if artifacts_path is not None:
                 simple_format_option.artifacts_path = artifacts_path
 
-            # Use image-native backend for IMAGE to avoid pypdfium2 locking
-            image_format_option = PdfFormatOption(
-                pipeline_options=pipeline_options,
-                backend=ImageDocumentBackend,
-                backend_options=pdf_backend_options,
-            )
-
             format_options = {
                 InputFormat.PDF: pdf_format_option,
-                InputFormat.IMAGE: image_format_option,
+                InputFormat.IMAGE: pdf_format_option,
                 InputFormat.METS_GBS: mets_gbs_format_option,
                 InputFormat.DOCX: WordFormatOption(
                     pipeline_options=simple_format_option
@@ -744,15 +690,10 @@ def convert(  # noqa: C901
 
                         pipeline_options.vlm_options = SMOLDOCLING_MLX
                     except ImportError:
-                        if sys.version_info < (3, 14):
-                            _log.warning(
-                                "To run SmolDocling faster, please install mlx-vlm:\n"
-                                "pip install mlx-vlm"
-                            )
-                        else:
-                            _log.warning(
-                                "You can run SmolDocling faster with MLX support, but it is unfortunately not yet available on Python 3.14."
-                            )
+                        _log.warning(
+                            "To run SmolDocling faster, please install mlx-vlm:\n"
+                            "pip install mlx-vlm"
+                        )
 
             elif vlm_model == VlmModelType.GRANITEDOCLING:
                 pipeline_options.vlm_options = GRANITEDOCLING_TRANSFORMERS
@@ -762,16 +703,10 @@ def convert(  # noqa: C901
 
                         pipeline_options.vlm_options = GRANITEDOCLING_MLX
                     except ImportError:
-                        if sys.version_info < (3, 14):
-                            _log.warning(
-                                "To run GraniteDocling faster, please install mlx-vlm:\n"
-                                "pip install mlx-vlm"
-                            )
-                        else:
-                            _log.warning(
-                                "You can run GraniteDocling faster with MLX support, but it is unfortunately not yet available on Python 3.14."
-                            )
-
+                        _log.warning(
+                            "To run GraniteDocling faster, please install mlx-vlm:\n"
+                            "pip install mlx-vlm"
+                        )
             elif vlm_model == VlmModelType.SMOLDOCLING_VLLM:
                 pipeline_options.vlm_options = SMOLDOCLING_VLLM
 
@@ -787,74 +722,42 @@ def convert(  # noqa: C901
                 InputFormat.IMAGE: pdf_format_option,
             }
 
-        # Set ASR options
-        asr_pipeline_options = AsrPipelineOptions(
-            accelerator_options=AcceleratorOptions(
-                device=device,
-                num_threads=num_threads,
-            ),
-            # enable_remote_services=enable_remote_services,
-            # artifacts_path = artifacts_path
-        )
+        elif pipeline == ProcessingPipeline.ASR:
+            pipeline_options = AsrPipelineOptions(
+                # enable_remote_services=enable_remote_services,
+                # artifacts_path = artifacts_path
+            )
 
-        # Auto-selecting models (choose best implementation for hardware)
-        if asr_model == AsrModelType.WHISPER_TINY:
-            asr_pipeline_options.asr_options = WHISPER_TINY
-        elif asr_model == AsrModelType.WHISPER_SMALL:
-            asr_pipeline_options.asr_options = WHISPER_SMALL
-        elif asr_model == AsrModelType.WHISPER_MEDIUM:
-            asr_pipeline_options.asr_options = WHISPER_MEDIUM
-        elif asr_model == AsrModelType.WHISPER_BASE:
-            asr_pipeline_options.asr_options = WHISPER_BASE
-        elif asr_model == AsrModelType.WHISPER_LARGE:
-            asr_pipeline_options.asr_options = WHISPER_LARGE
-        elif asr_model == AsrModelType.WHISPER_TURBO:
-            asr_pipeline_options.asr_options = WHISPER_TURBO
+            if asr_model == AsrModelType.WHISPER_TINY:
+                pipeline_options.asr_options = WHISPER_TINY
+            elif asr_model == AsrModelType.WHISPER_SMALL:
+                pipeline_options.asr_options = WHISPER_SMALL
+            elif asr_model == AsrModelType.WHISPER_MEDIUM:
+                pipeline_options.asr_options = WHISPER_MEDIUM
+            elif asr_model == AsrModelType.WHISPER_BASE:
+                pipeline_options.asr_options = WHISPER_BASE
+            elif asr_model == AsrModelType.WHISPER_LARGE:
+                pipeline_options.asr_options = WHISPER_LARGE
+            elif asr_model == AsrModelType.WHISPER_TURBO:
+                pipeline_options.asr_options = WHISPER_TURBO
+            else:
+                _log.error(f"{asr_model} is not known")
+                raise ValueError(f"{asr_model} is not known")
 
-        # Explicit MLX models (force MLX implementation)
-        elif asr_model == AsrModelType.WHISPER_TINY_MLX:
-            asr_pipeline_options.asr_options = WHISPER_TINY_MLX
-        elif asr_model == AsrModelType.WHISPER_SMALL_MLX:
-            asr_pipeline_options.asr_options = WHISPER_SMALL_MLX
-        elif asr_model == AsrModelType.WHISPER_MEDIUM_MLX:
-            asr_pipeline_options.asr_options = WHISPER_MEDIUM_MLX
-        elif asr_model == AsrModelType.WHISPER_BASE_MLX:
-            asr_pipeline_options.asr_options = WHISPER_BASE_MLX
-        elif asr_model == AsrModelType.WHISPER_LARGE_MLX:
-            asr_pipeline_options.asr_options = WHISPER_LARGE_MLX
-        elif asr_model == AsrModelType.WHISPER_TURBO_MLX:
-            asr_pipeline_options.asr_options = WHISPER_TURBO_MLX
+            _log.info(f"pipeline_options: {pipeline_options}")
 
-        # Explicit Native models (force native implementation)
-        elif asr_model == AsrModelType.WHISPER_TINY_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_TINY_NATIVE
-        elif asr_model == AsrModelType.WHISPER_SMALL_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_SMALL_NATIVE
-        elif asr_model == AsrModelType.WHISPER_MEDIUM_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_MEDIUM_NATIVE
-        elif asr_model == AsrModelType.WHISPER_BASE_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_BASE_NATIVE
-        elif asr_model == AsrModelType.WHISPER_LARGE_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_LARGE_NATIVE
-        elif asr_model == AsrModelType.WHISPER_TURBO_NATIVE:
-            asr_pipeline_options.asr_options = WHISPER_TURBO_NATIVE
+            audio_format_option = AudioFormatOption(
+                pipeline_cls=AsrPipeline,
+                pipeline_options=pipeline_options,
+            )
 
-        else:
-            _log.error(f"{asr_model} is not known")
-            raise ValueError(f"{asr_model} is not known")
+            format_options = {
+                InputFormat.AUDIO: audio_format_option,
+            }
 
-        _log.debug(f"ASR pipeline_options: {asr_pipeline_options}")
-
-        audio_format_option = AudioFormatOption(
-            pipeline_cls=AsrPipeline,
-            pipeline_options=asr_pipeline_options,
-        )
-        format_options[InputFormat.AUDIO] = audio_format_option
-
-        # Common options for all pipelines
         if artifacts_path is not None:
             pipeline_options.artifacts_path = artifacts_path
-            asr_pipeline_options.artifacts_path = artifacts_path
+            # audio_pipeline_options.artifacts_path = artifacts_path
 
         doc_converter = DocumentConverter(
             allowed_formats=from_formats,

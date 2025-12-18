@@ -418,6 +418,60 @@ class ConversionResult(ConversionAssets):
     input: InputDocument
     assembled: AssembledUnit = AssembledUnit()
 
+    def serialize(self, indent: Optional[int] = 2) -> str:
+        """Serialize the ConversionResult to a JSON string.
+
+        Args:
+            indent: Number of spaces for JSON indentation. None for compact output.
+
+        Returns:
+            JSON string representation of the ConversionResult.
+        """
+        return self.model_dump_json(indent=indent)
+
+    @classmethod
+    def deserialize(cls, json_str: str) -> "ConversionResult":
+        """Deserialize a JSON string to a ConversionResult.
+
+        Args:
+            json_str: JSON string representation of a ConversionResult.
+
+        Returns:
+            Reconstructed ConversionResult instance.
+
+        Note:
+            The InputDocument will be reconstructed with metadata only.
+            The original file/stream backend is not restored.
+        """
+        data = json.loads(json_str)
+
+        # Reconstruct InputDocument using model_construct to bypass custom __init__
+        input_data = data.pop("input")
+        input_doc = InputDocument.model_construct(
+            file=PurePath(input_data["file"]),
+            document_hash=input_data["document_hash"],
+            valid=input_data.get("valid", False),  # Mark as invalid since backend unavailable
+            format=InputFormat(input_data["format"]),
+            filesize=input_data.get("filesize"),
+            page_count=input_data.get("page_count", 0),
+            limits=DocumentLimits.model_validate(input_data["limits"]),
+            backend_options=input_data.get("backend_options"),
+        )
+
+        # Build the rest of the ConversionResult
+        return cls.model_construct(
+            input=input_doc,
+            version=DoclingVersion.model_validate(data["version"]),
+            timestamp=data.get("timestamp"),
+            status=ConversionStatus(data["status"]),
+            errors=[ErrorItem.model_validate(e) for e in data.get("errors", [])],
+            pages=[Page.model_validate(p) for p in data.get("pages", [])],
+            timings={k: ProfilingItem.model_validate(v) for k, v in data.get("timings", {}).items()},
+            confidence=ConfidenceReport.model_validate(data.get("confidence", {})),
+            document=DoclingDocument.model_validate(data["document"]),
+            assembled=AssembledUnit.model_validate(data.get("assembled", {})),
+        )
+
 
 class _DummyBackend(AbstractDocumentBackend):
     def __init__(self, *args, **kwargs):
